@@ -223,9 +223,6 @@ function parseVlessUrl(url) {
             proxy['dialer-proxy'] = params.get('dp');
         }
 
-        // UDP
-        proxy.udp = true;
-
         return proxy;
     } catch (e) {
         console.error('解析 VLESS URL 失败:', e);
@@ -313,9 +310,6 @@ function parseTrojanUrl(url) {
         if (params.get('dp')) {
             proxy['dialer-proxy'] = params.get('dp');
         }
-
-        // UDP
-        proxy.udp = true;
 
         return proxy;
     } catch (e) {
@@ -426,13 +420,44 @@ function parseVmessUrl(url) {
         }
 
         // UDP
-        proxy.udp = true;
+        // proxy.udp = true;
 
         return proxy;
     } catch (e) {
         console.error('解析 VMess URL 失败:', e);
         return null;
     }
+}
+
+/**
+ * 解析 Shadowsocks 插件参数 (SIP002)
+ * 格式: plugin-name;opt1=val1;opt2=val2
+ */
+function parseSsPlugin(pluginStr) {
+    if (!pluginStr) return null;
+    // 插件参数内部通常用分号分隔
+    const parts = pluginStr.split(';');
+    const name = parts[0];
+    const opts = {};
+    for (let i = 1; i < parts.length; i++) {
+        const item = parts[i];
+        if (!item) continue;
+        const eqIndex = item.indexOf('=');
+        if (eqIndex === -1) {
+            // 布尔值标识位，例如 "tls"
+            opts[item] = true;
+        } else {
+            const key = item.substring(0, eqIndex);
+            let val = item.substring(eqIndex + 1);
+            // 处理 SIP002 转义：\= -> =, \; -> ;, \? -> ?
+            val = val.replace(/\\=/g, '=').replace(/\\;/g, ';').replace(/\\\?/g, '?').replace(/\\:/g, ':');
+            // 尝试处理布尔值字符串
+            if (val === 'true') val = true;
+            if (val === 'false') val = false;
+            opts[key] = val;
+        }
+    }
+    return { name, opts };
 }
 
 /**
@@ -444,18 +469,18 @@ function parseSsUrl(url) {
     try {
         // ss://base64(method:password)@server:port#name
         // 或 ss://base64(method:password@server:port)#name
+        // [SIP002] 格式支持插件：ss://userInfo@server:port?plugin=xxx#name
         let body = url.substring(5); // 去掉 ss://
         const name = extractName(url);
+        const params = parseQueryParams(url);
 
         // 去掉 fragment
         const hashIndex = body.indexOf('#');
         if (hashIndex !== -1) body = body.substring(0, hashIndex);
 
-        // 去掉 query
+        // 去掉 query 部分，保留核心 body 用于解析用户信息和服务器
         const queryIndex = body.indexOf('?');
-        let queryPart = '';
         if (queryIndex !== -1) {
-            queryPart = body.substring(queryIndex);
             body = body.substring(0, queryIndex);
         }
 
@@ -522,8 +547,27 @@ function parseSsUrl(url) {
             password
         };
 
+        // [核心修复] 解析并补全插件信息
+        const pluginStr = params.get('plugin');
+        if (pluginStr) {
+            const pluginDetails = parseSsPlugin(pluginStr);
+            if (pluginDetails) {
+                proxy.plugin = pluginDetails.name;
+                proxy['plugin-opts'] = pluginDetails.opts;
+                
+                // 协议兼容性映射 (TLS / Host)
+                if (pluginDetails.opts.tls || pluginDetails.opts.mode?.includes('tls') || pluginDetails.opts.security === 'tls') {
+                    proxy.tls = true;
+                }
+                if (pluginDetails.opts.host) {
+                    proxy.sni = pluginDetails.opts.host;
+                    proxy.servername = pluginDetails.opts.host;
+                }
+            }
+        }
+
         // UDP
-        proxy.udp = true;
+        // proxy.udp = true;
 
         return proxy;
     } catch (e) {
@@ -1197,8 +1241,21 @@ export function urlsToClashProxies(urls, options = {}) {
             
             // [URL 参数覆盖] 补全对 TFO/UDP/SCV 的映射
             if (options.enableTfo !== undefined) proxy.tfo = options.enableTfo;
-            if (options.enableUdp !== undefined) proxy.udp = options.enableUdp;
-            if (options.skipCertVerify !== undefined) proxy['skip-cert-verify'] = options.skipCertVerify;
+            
+            if (options.enableUdp !== undefined) {
+                const type = (proxy.type || '').toLowerCase();
+                const isNativeUdp = ['hysteria2', 'hy2', 'tuic', 'hysteria', 'wireguard'].includes(type);
+                
+                if (options.enableUdp) {
+                    proxy.udp = true;
+                } else if (!isNativeUdp) {
+                    proxy.udp = false;
+                } else {
+                    proxy.udp = true; // 原生 UDP 协议即便开关关闭也保持开启
+                }
+            }
+            
+            if (options.skipCertVerify) proxy['skip-cert-verify'] = true;
 
             // [智能增强] 注入元数据
             proxy.metadata = extractNodeMetadata(proxy.name);

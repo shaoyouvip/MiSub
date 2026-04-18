@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = {
     transformConfig: '',
     ruleLevel: 'std',
     builtinSkipCertVerify: false,
-    builtinEnableUdp: false,
+    builtinEnableUdp: true,
     builtinLoonSkipCertVerify: false,
     enableAccessLog: false,
     accessLogPersistenceMode: 'light',
@@ -43,7 +43,8 @@ export const DEFAULT_SETTINGS = {
     defaultPrefixSettings: {
         enableManualNodes: true,
         enableSubscriptions: true,
-        manualNodePrefix: '手动节点'
+        manualNodePrefix: '手动节点',
+        prependGroupName: false
     },
     defaultOperators: [], // 新版操作符链式处理 (New Unified Pipeline)
     // @deprecated 使用 defaultOperators 代替
@@ -98,8 +99,21 @@ export const DEFAULT_SETTINGS = {
     },
     // 留言板设置
     guestbook: {
-        enabled: false,           // 总开关
-        allowAnonymous: true      // 是否允许匿名
+        enabled: false,
+        allowAnonymous: true
+    },
+    // 自定义公开页设置
+    customPage: {
+        enabled: false,           // 是否启用自定义页面
+        type: 'html',            // 页面渲染方式
+        content: '',             // 页面代码内容
+        css: '',                 // 自定义全局样式
+        useDefaultLayout: true,  // 是否包裹在默认的基础布局中 (包含背景、容器等)
+        allowExternalStylesheets: false, // 是否允许加载 HTML 源码中的外链样式表
+        allowScripts: false,     // 是否允许执行 HTML 源码中的 script
+        hideBranding: false,     // 是否隐藏公开页中的 MiSub 品牌标识
+        hideHeader: false,       // 自定义公开页是否隐藏全局页头
+        hideFooter: false        // 自定义公开页是否隐藏全局页脚
     },
     // 订阅转换设置
     subconverter: {
@@ -118,7 +132,7 @@ export const DEFAULT_SETTINGS = {
 
 // System constants
 export const SYSTEM_CONSTANTS = {
-    VERSION: '2.5.0',
+    VERSION: '2.6.4',
     // Use v2rayN UA to fetch subscriptions reliably.
     FETCHER_USER_AGENT: 'v2rayN/7.23'
 };

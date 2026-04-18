@@ -87,10 +87,23 @@ function clashProxyToLoonResult(proxy) {
         parts.push(loonQuote(proxy.password || ''));
         
         if (proxy.udp) parts.push('udp-relay=true');
-        if (proxy.obfs) {
-            parts.push(`obfs-name=${proxy.obfs}`);
-            if (proxy['obfs-host']) parts.push(`obfs-host=${loonQuote(proxy['obfs-host'])}`);
-            if (proxy['obfs-uri']) parts.push(`obfs-uri=${loonQuote(proxy['obfs-uri'])}`);
+        
+        // 插件支持
+        const plugin = proxy.plugin || '';
+        const opts = proxy['plugin-opts'] || proxy.pluginOpts || {};
+
+        if (plugin === 'obfs-local' || proxy.obfs) {
+            parts.push(`obfs-name=${proxy.obfs || opts.mode}`);
+            const host = proxy['obfs-host'] || opts.host;
+            if (host) parts.push(`obfs-host=${loonQuote(host)}`);
+            const uri = proxy['obfs-uri'] || opts.uri;
+            if (uri) parts.push(`obfs-uri=${loonQuote(uri)}`);
+        } else if (plugin === 'v2ray-plugin' || opts.mode === 'websocket') {
+            // v2ray-plugin 在 Loon 中映射为 transport=ws
+            parts.push('transport=ws');
+            if (opts.path) parts.push(`path=${loonQuote(opts.path)}`);
+            if (opts.host) parts.push(`host=${loonQuote(opts.host)}`);
+            if (opts.tls || opts.mode === 'websocket-tls') parts.push('over-tls=true');
         }
     } else if (type === 'vmess') {
         parts.push(`${name} = vmess`);
@@ -275,6 +288,9 @@ export function generateBuiltinLoonConfig(nodeList, options = {}) {
     // 转换为 Clash 代理对象
     const proxies = urlsToClashProxies(nodeUrls, options);
 
+    // 应用 UDP 开关
+    // (已在 urlsToClashProxies 中全局处理)
+    
     for (const clashProxy of proxies) {
 
         const baseName = sanitizeNodeName(clashProxy.name);

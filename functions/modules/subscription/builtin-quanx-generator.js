@@ -60,10 +60,21 @@ function buildQxLine(proxy) {
         const method = proxy.cipher || 'aes-128-gcm';
         const password = proxy.password || '';
         const extraParts = [];
-        if (proxy.obfs) {
-            extraParts.push(`obfs=${proxy.obfs}`);
-            if (proxy['obfs-host']) extraParts.push(`obfs-host=${proxy['obfs-host']}`);
+
+        // 插件支持
+        const plugin = proxy.plugin || '';
+        const opts = proxy['plugin-opts'] || proxy.pluginOpts || {};
+
+        if (plugin === 'obfs-local' || proxy.obfs) {
+            extraParts.push(`obfs=${proxy.obfs || opts.mode}`);
+            if (proxy['obfs-host'] || opts.host) extraParts.push(`obfs-host=${proxy['obfs-host'] || opts.host}`);
+        } else if (plugin === 'v2ray-plugin' || opts.mode === 'websocket') {
+            extraParts.push('obfs=ws');
+            if (opts.path) extraParts.push(`obfs-uri=${opts.path}`);
+            if (opts.host) extraParts.push(`obfs-host=${opts.host}`);
+            if (opts.tls || opts.mode === 'websocket-tls') extraParts.push('over-tls=true');
         }
+
         if (proxy.udp) extraParts.push('udp-relay=true');
         if (proxy.tfo) extraParts.push('fast-open=true');
         return `shadowsocks=${server}:${port}, method=${method}, password=${password}${extraParts.length > 0 ? `, ${extraParts.join(', ')}` : ''}, tag=${name}`;
@@ -214,6 +225,9 @@ export function generateBuiltinQuanxConfig(nodeList, options = {}) {
     // 转换为 Clash 代理对象
     const proxies = urlsToClashProxies(nodeUrls, options);
 
+    // 应用 UDP 开关
+    // (已在 urlsToClashProxies 中全局处理)
+    
     for (const clashProxy of proxies) {
         const baseName = sanitizeNodeName(clashProxy.name);
         clashProxy.name = getUniqueName(baseName, usedNames);
