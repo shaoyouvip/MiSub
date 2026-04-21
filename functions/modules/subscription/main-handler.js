@@ -98,6 +98,11 @@ export function resolveTemplateSource(value) {
     return { kind: 'remote', value: normalizedValue };
 }
 
+export function resolveExternalTemplateConfigUrl(templateSource) {
+    if (!templateSource || typeof templateSource !== 'object') return '';
+    return templateSource.kind === 'remote' ? String(templateSource.value || '').trim() : '';
+}
+
 /**
  * 处理MiSub订阅请求
  * @param {Object} context - Cloudflare上下文
@@ -547,9 +552,9 @@ export async function handleMisubRequest(context) {
         });
 
         // Pass Remote Config if applicable
-        if (templateUrl && templateSource.kind === 'remote') {
-            // [回滚] 恢复使用 URL 传递配置。虽然 Base64 更可靠，但并非所有后端都支持 base64: 前缀
-            externalUrl.searchParams.set('config', templateSource.value);
+        const externalTemplateConfigUrl = resolveExternalTemplateConfigUrl(templateSource);
+        if (externalTemplateConfigUrl) {
+            externalUrl.searchParams.set('config', externalTemplateConfigUrl);
         }
 
         // Add File Name
@@ -577,7 +582,8 @@ export async function handleMisubRequest(context) {
             headers: {
                 'Location': externalUrl.toString(),
                 'Cache-Control': 'no-store, no-cache',
-                'X-MiSub-Mode': 'external-redirect-v2'
+                'X-MiSub-Mode': 'external-redirect-v2',
+                ...(templateSource.kind === 'builtin' ? { 'X-MiSub-Template-Warning': 'external-engine-ignores-builtin-template' } : {})
             }
         });
     }
@@ -672,8 +678,15 @@ export async function handleMisubRequest(context) {
                 return acc;
             }, { upload: 0, download: 0, total: 0, expire: 0 });
 
-            const userInfoHeader = totalUserInfo.total > 0 
-                ? `upload=${totalUserInfo.upload}; download=${totalUserInfo.download}; total=${totalUserInfo.total}; expire=${totalUserInfo.expire}`
+            const safeUserInfo = {
+                upload: isFinite(totalUserInfo.upload) ? totalUserInfo.upload : 0,
+                download: isFinite(totalUserInfo.download) ? totalUserInfo.download : 0,
+                total: isFinite(totalUserInfo.total) ? totalUserInfo.total : 0,
+                expire: isFinite(totalUserInfo.expire) ? totalUserInfo.expire : 0
+            };
+
+            const userInfoHeader = safeUserInfo.total > 0 
+                ? `upload=${safeUserInfo.upload}; download=${safeUserInfo.download}; total=${safeUserInfo.total}; expire=${safeUserInfo.expire}`
                 : null;
 
             let { content: finalContent, contentType, headers: resultHeaders } = await ProcessorService.renderOutput({
@@ -698,9 +711,15 @@ export async function handleMisubRequest(context) {
             }
 
             const isJson = targetFormat === 'singbox' || targetFormat === 'sing-box';
+            
+            // [RFC 6266 / RFC 5987] Standardized Content-Disposition
+            // filename: ASCII-only fallback, filename*: UTF-8 encoded
+            const asciiSubName = subName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '\\"');
+            const encodedSubName = encodeURIComponent(subName).replace(/'/g, "%27").replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\*/g, "%2A");
+            
             const responseHeaders = new Headers({
-                "Content-Disposition": `attachment; filename="${encodeURIComponent(subName)}"; filename*=utf-8''${encodeURIComponent(subName)}`,
-                'Content-Type': contentType,
+                "Content-Disposition": `attachment; filename="${asciiSubName}"; filename*=utf-8''${encodedSubName}`,
+                'Content-Type': contentType || 'text/plain; charset=utf-8',
                 'Cache-Control': 'no-store, no-cache',
                 'X-MiSub-Mode': `builtin-${targetFormat}`,
                 'Access-Control-Allow-Origin': '*'
@@ -743,7 +762,7 @@ export async function handleMisubRequest(context) {
                 }
             }
 
-            return new Response(finalContent, { headers: responseHeaders });
+            return new Response(finalContent || '', { headers: responseHeaders });
 
         } catch (e) {
             console.error(`[Builtin${targetFormat}] Generation failed:`, e);
