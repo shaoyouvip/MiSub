@@ -19,6 +19,10 @@ function filterAutoSelectMembers(group) {
     return members.filter(member => !['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS'].includes(String(member).toUpperCase()));
 }
 
+const ACL4SSR_ROOT_PROVIDER_FILES = new Set([
+    'proxygfwlist'
+]);
+
 function toClashRuleProviderUrl(sourceUrl) {
     if (!/^https?:\/\//i.test(String(sourceUrl || ''))) return sourceUrl;
 
@@ -27,13 +31,18 @@ function toClashRuleProviderUrl(sourceUrl) {
         if (!/raw\.githubusercontent\.com$/i.test(url.hostname)) return sourceUrl;
         if (!/\/Clash\/.*\.(list|txt)$/i.test(url.pathname)) return sourceUrl;
 
+        const fileName = url.pathname.split('/').pop()?.replace(/\.(list|txt)$/i, '') || '';
         if (/\/Clash\/Ruleset\//i.test(url.pathname)) {
             url.pathname = url.pathname
                 .replace(/\/Clash\/Ruleset\//i, '/Clash/Providers/Ruleset/')
                 .replace(/\.(list|txt)$/i, '.yaml');
-        } else {
+        } else if (ACL4SSR_ROOT_PROVIDER_FILES.has(fileName.toLowerCase())) {
             url.pathname = url.pathname
                 .replace(/\/Clash\//i, '/Clash/Providers/')
+                .replace(/\.(list|txt)$/i, '.yaml');
+        } else {
+            url.pathname = url.pathname
+                .replace(/\/Clash\//i, '/Clash/Providers/Ruleset/')
                 .replace(/\.(list|txt)$/i, '.yaml');
         }
 
@@ -97,6 +106,18 @@ export function renderClashFromTemplateModel(model) {
         'mode': 'rule',
         'log-level': 'info',
         'external-controller': ':9090',
+        'dns': {
+            'enable': true,
+            'listen': '0.0.0.0:1053',
+            'default-nameserver': ['223.5.5.5', '1.1.1.1'],
+            'enhanced-mode': 'fake-ip',
+            'fake-ip-range': '198.18.0.1/16',
+            'fake-ip-filter': ['*.lan', '*.localhost'],
+            'nameserver': [
+                'https://dns.alidns.com/dns-query',
+                'https://doh.pub/dns-query'
+            ]
+        },
         'proxies': normalizedModel.proxies,
         'proxy-groups': normalizedModel.groups
             .filter(group =>
@@ -104,20 +125,6 @@ export function renderClashFromTemplateModel(model) {
                 (Array.isArray(group.filters) && group.filters.length > 0)
             )
             .map(group => {
-                const rawType = String(group.type || '').trim().toLowerCase();
-                const isRelayGroup = rawType === 'relay' || (group.name?.includes('链式代理') && Array.isArray(group.proxies) && group.proxies.length >= 2);
-
-                if (isRelayGroup && Array.isArray(group.proxies) && group.proxies.length >= 2) {
-                    const members = filterAutoSelectMembers(group);
-                    return {
-                        name: group.name,
-                        type: 'select',
-                        proxies: members.slice(1),
-                        'dialer-proxy': members[0],
-                        ...group.options
-                    };
-                }
-
                 return {
                     name: group.name,
                     type: mapGroupType(group.type),

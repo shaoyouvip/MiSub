@@ -81,6 +81,21 @@ const expiryInfo = computed(() => {
         style: style
     };
 });
+
+const websiteUrl = computed(() => {
+  const notes = props.misub.notes;
+  if (!notes) return null;
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const matches = notes.match(urlRegex);
+  return matches ? matches[0] : null;
+});
+
+const noteWithoutUrl = computed(() => {
+  const notes = props.misub.notes;
+  if (!notes) return '';
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  return notes.replace(urlRegex, '').trim();
+});
 </script>
 
 <template>
@@ -176,11 +191,14 @@ const expiryInfo = computed(() => {
 
       <!-- Notes (Collapsible or Small) -->
       <div v-if="misub.notes" class="mt-3 flex items-center gap-1 truncate text-[10px] text-gray-400">
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
-        {{ misub.notes }}
+        <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
+        <span class="truncate">{{ noteWithoutUrl }}</span>
+        <a v-if="websiteUrl" :href="websiteUrl" target="_blank" @click.stop class="ml-1 flex items-center gap-0.5 text-primary-500 hover:text-primary-600 font-medium transition-colors cursor-pointer" title="访问官网">
+          官网
+          <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+        </a>
       </div>
 
     </div>
   </div>
 </template>
-
