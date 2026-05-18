@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import TransformSelector from '@/components/forms/TransformSelector.vue';
 import Switch from '@/components/ui/Switch.vue';
 import SectionHeader from '../../SectionHeader.vue';
+import RuleTemplateManager from './RuleTemplateManager.vue';
 
 const props = defineProps({
   settings: {
@@ -14,7 +15,8 @@ const props = defineProps({
 const modeOptions = [
   { value: 'builtin', label: '使用内置自动分流' },
   { value: 'preset', label: '选择预设规则模板' },
-  { value: 'custom', label: '自定义远程规则 URL' }
+  { value: 'custom', label: '自定义远程规则 URL' },
+  { value: 'custom_template', label: '自定义规则模板' }
 ];
 
 const selectedAsset = ref(null);
@@ -60,6 +62,9 @@ const modeHint = computed(() => {
   if (props.settings.transformConfigMode === 'preset') {
     return '从库中选择成熟的规则方案（如 ACL4SSR）。支持内置渲染及第三方后端转换。';
   }
+  if (props.settings.transformConfigMode === 'custom_template') {
+    return '使用本地保存的自定义规则模板，避免依赖远程 .ini 地址。';
+  }
   return '高级模式。使用您指定的远程 .ini 配置文件作为转换基准（适用于第三方后端及部分内置环境）。';
 });
 
@@ -72,11 +77,11 @@ watch(isExternalEngine, (enabled) => {
   props.settings.builtinSkipCertVerify = false;
   props.settings.builtinEnableUdp = false;
 
-  if (props.settings.transformConfigMode === 'builtin') {
+  if (props.settings.transformConfigMode === 'builtin' || props.settings.transformConfigMode === 'custom_template') {
     props.settings.transformConfigMode = 'preset';
   }
 
-  if (String(props.settings.transformConfig || '').startsWith('builtin:')) {
+  if (/^(builtin|custom):/.test(String(props.settings.transformConfig || ''))) {
     props.settings.transformConfig = '';
     selectedAsset.value = null;
   }
@@ -139,7 +144,7 @@ watch(isExternalEngine, (enabled) => {
                 v-for="option in modeOptions"
                 :key="option.value"
                 :value="option.value"
-                :disabled="option.value === 'builtin' && isExternalEngine"
+                :disabled="(option.value === 'builtin' || option.value === 'custom_template') && isExternalEngine"
               >
                 {{ option.label }}
               </option>
@@ -148,7 +153,7 @@ watch(isExternalEngine, (enabled) => {
               {{ modeHint }}
             </p>
             <p v-if="isExternalEngine" class="mt-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
-              使用第三方订阅转换时，无法兼容 MiSub 内置规则。请使用远程预设模板或自定义 URL。
+              使用第三方订阅转换时，无法兼容 MiSub 内置规则、内置预设和本地 custom: 模板。请使用远程预设模板或自定义 URL。
             </p>
           </div>
 
@@ -202,11 +207,15 @@ watch(isExternalEngine, (enabled) => {
             @select-asset="selectedAsset = $event"
             type="config"
             :force-custom="settings.transformConfigMode === 'custom'"
+            :custom-templates-only="settings.transformConfigMode === 'custom_template'"
             placeholder="选择预设规则配置..."
             custom-placeholder="输入远程 .ini 配置文件 URL"
             :allowEmpty="settings.transformConfigMode === 'builtin'"
             :exclude-builtin-assets="isExternalEngine"
           />
+          <p v-if="settings.transformConfigMode === 'custom_template'" class="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-[10px] leading-relaxed text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300">
+            请在下方“自定义规则模板”中新建并保存模板，然后在此处选择 custom: 开头的模板项。
+          </p>
         </div>
       </div>
     </div>
@@ -246,5 +255,6 @@ watch(isExternalEngine, (enabled) => {
         </div>
       </div>
     </div>
+    <RuleTemplateManager />
   </div>
 </template>

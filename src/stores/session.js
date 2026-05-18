@@ -11,8 +11,10 @@ export const useSessionStore = defineStore('session', () => {
   const sessionState = ref('loading'); // loading, loggedIn, loggedOut
   const initialData = ref(null);
   const subscriptionConfig = ref({}); // [NEW] Added subscriptionConfig
-  const publicConfig = ref({
+  const securityWarning = ref(null);
+  const defaultPublicConfig = Object.freeze({
     enablePublicPage: true,
+    customLoginPath: 'login',
     customPage: {
       enabled: false,
       useDefaultLayout: true,
@@ -22,7 +24,14 @@ export const useSessionStore = defineStore('session', () => {
       hideHeader: false,
       hideFooter: false
     }
-  }); // Default true until fetched
+  });
+
+  const disabledPublicConfig = Object.freeze({
+    ...defaultPublicConfig,
+    enablePublicPage: false
+  });
+
+  const publicConfig = ref({ ...defaultPublicConfig, customPage: { ...defaultPublicConfig.customPage } }); // Default true until fetched
 
   async function checkSession() {
     // Parallel fetch of initial data (auth check) and public config
@@ -36,17 +45,7 @@ export const useSessionStore = defineStore('session', () => {
       publicConfig.value = pConfigResult.data;
     } else {
       // Fallback to default if fetch fails
-      publicConfig.value = {
-        enablePublicPage: false,
-        customPage: {
-          enabled: false,
-          allowExternalStylesheets: false,
-          allowScripts: false,
-          hideBranding: false,
-          hideHeader: false,
-          hideFooter: false
-        }
-      };
+      publicConfig.value = { ...disabledPublicConfig, customPage: { ...disabledPublicConfig.customPage } };
     }
 
     if (dataResult.success) {
@@ -78,6 +77,7 @@ export const useSessionStore = defineStore('session', () => {
   async function login(password) {
     const result = await apiLogin(password);
     if (result.success) {
+      securityWarning.value = result.data?.securityWarning || null;
       handleLoginSuccess();
       // 登录成功后跳转到仪表盘
       router.push({ path: '/dashboard' });
@@ -99,6 +99,7 @@ export const useSessionStore = defineStore('session', () => {
     }
     sessionState.value = 'loggedOut';
     initialData.value = null;
+    securityWarning.value = null;
 
     // 清除缓存数据
     const dataStore = useDataStore();
@@ -108,5 +109,5 @@ export const useSessionStore = defineStore('session', () => {
     router.push({ path: '/' });
   }
 
-  return { sessionState, initialData, publicConfig, subscriptionConfig, checkSession, login, logout };
+  return { sessionState, initialData, publicConfig, subscriptionConfig, securityWarning, checkSession, login, logout };
 });

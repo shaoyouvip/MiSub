@@ -20,6 +20,13 @@ import { shouldApplyExternalTemplateForTarget } from './template-compatibility.j
 import { renderClashFromIniTemplate, renderLoonFromIniTemplate, renderQuanxFromIniTemplate, renderSingboxFromIniTemplate, renderSurgeFromIniTemplate } from './template-pipeline.js';
 import { getBuiltinTemplate } from './builtin-template-registry.js';
 
+function maskSensitiveLogValue(value) {
+    const text = String(value ?? '');
+    if (!text) return '';
+    if (text.length <= 8) return '***';
+    return `${text.slice(0, 4)}…${text.slice(-4)} (${text.length})`;
+}
+
 const PROFILE_DOWNLOAD_COUNT_PREFIX = 'misub_profile_download_count_';
 
 function getProfileDownloadCountKey(profile) {
@@ -87,6 +94,40 @@ export function buildManagedConfigUrl(requestUrl) {
     return managedUrl.toString();
 }
 
+function getCurrentRequestUserInfo(context, sub) {
+    const currentInfo = context?.currentSubscriptionRuntimeInfo || {};
+    const runtimeKey = [sub?.id, sub?.url].find(key => key && Object.prototype.hasOwnProperty.call(currentInfo, key));
+    if (runtimeKey) {
+        return currentInfo[runtimeKey]?.userInfo || null;
+    }
+    return sub?.userInfo || null;
+}
+
+function buildUserInfoHeaderFromSubscriptions(context, subscriptions) {
+    const totalUserInfo = subscriptions.reduce((acc, sub) => {
+        const userInfo = sub?.enabled ? getCurrentRequestUserInfo(context, sub) : null;
+        if (!userInfo) return acc;
+
+        return {
+            upload: (acc.upload || 0) + (userInfo.upload || 0),
+            download: (acc.download || 0) + (userInfo.download || 0),
+            total: (acc.total || 0) + (userInfo.total || 0),
+            expire: Math.max(acc.expire || 0, userInfo.expire || 0)
+        };
+    }, { upload: 0, download: 0, total: 0, expire: 0 });
+
+    const safeUserInfo = {
+        upload: isFinite(totalUserInfo.upload) ? totalUserInfo.upload : 0,
+        download: isFinite(totalUserInfo.download) ? totalUserInfo.download : 0,
+        total: isFinite(totalUserInfo.total) ? totalUserInfo.total : 0,
+        expire: isFinite(totalUserInfo.expire) ? totalUserInfo.expire : 0
+    };
+
+    return safeUserInfo.total > 0
+        ? `upload=${safeUserInfo.upload}; download=${safeUserInfo.download}; total=${safeUserInfo.total}; expire=${safeUserInfo.expire}`
+        : null;
+}
+
 export function resolveTemplateUrl(mode, value, fallbackUrl = '') {
     const normalizedMode = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
     const normalizedValue = typeof value === 'string' ? value.trim() : '';
@@ -94,6 +135,9 @@ export function resolveTemplateUrl(mode, value, fallbackUrl = '') {
 
     if (normalizedMode === 'builtin') return '';
     if (normalizedMode === 'global') return normalizedFallback;
+    if (normalizedMode === 'custom_template') {
+        return normalizedValue.startsWith('custom:') ? normalizedValue : '';
+    }
     if (normalizedMode === 'preset' || normalizedMode === 'custom') return normalizedValue;
 
     return normalizedValue;
@@ -104,6 +148,9 @@ export function resolveTemplateSource(value) {
     if (!normalizedValue) return { kind: 'none', value: '' };
     if (normalizedValue.startsWith('builtin:')) {
         return { kind: 'builtin', value: normalizedValue.slice('builtin:'.length) };
+    }
+    if (normalizedValue.startsWith('custom:')) {
+        return { kind: 'custom', value: normalizedValue.slice('custom:'.length) };
     }
     return { kind: 'remote', value: normalizedValue };
 }
@@ -179,10 +226,11 @@ export async function handleMisubRequest(context) {
     const url = new URL(request.url);
     const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
 
-    console.log(`\n[MiSub Request] ${request.method} ${url.pathname}${url.search}`);
+    console.log(`\n[MiSub Request] ${request.method} ${maskSensitiveLogValue(url.pathname)}${url.search ? ' ?…' : ''}`);
     console.log(`[MiSub UA] ${userAgentHeader}`);
 
     const storageAdapter = StorageFactory.createAdapter(env, await StorageFactory.getStorageType(env));
+    context.storage = storageAdapter;
     const [settingsData, allMisubs, allProfiles] = await Promise.all([
         storageAdapter.get(KV_KEY_SETTINGS),
         storageAdapter.getAllSubscriptions(),
@@ -226,7 +274,7 @@ export async function handleMisubRequest(context) {
     context.url = url; // [核心修复] 将 url 挂载到 context，确保后续服务能获取到 debug 参数
     const { token, profileIdentifier } = resolveRequestContext(url, config, allProfiles);
 
-    console.log(`[MiSub Parse] Token: ${token}, Profile: ${profileIdentifier}`);
+    console.log(`[MiSub Parse] Token: ${maskSensitiveLogValue(token)}, Profile: ${maskSensitiveLogValue(profileIdentifier)}`);
     const shouldSkipLogging = shouldSkipAccessLog(userAgentHeader);
 
     let targetMisubs;
@@ -385,7 +433,7 @@ export async function handleMisubRequest(context) {
     const resolvedGlobalLevel = config.ruleLevel || config.clashRuleLevel || 'std';
     
     let ruleLevel;
-    if (templateSource.kind === 'remote') {
+    if (templateSource.kind === 'remote' || templateSource.kind === 'custom') {
         ruleLevel = 'none';
     } else {
         ruleLevel = url.searchParams.get('level') || url.searchParams.get('ruleLevel') || resolvedProfileLevel || resolvedGlobalLevel;
@@ -540,14 +588,20 @@ export async function handleMisubRequest(context) {
     // 1. If 'nodes' format requested, return plain text nodes (DataSource for external converters)
     if (targetFormat === 'nodes') {
         const contentToReturn = isProfileExpired ? (DEFAULT_EXPIRED_NODE + '\n') : combinedNodeList;
+        const userInfoHeader = buildUserInfoHeaderFromSubscriptions(context, targetMisubs);
+        const nodeHeaders = {
+            "Content-Type": "text/plain; charset=utf-8",
+            'Cache-Control': 'no-store, no-cache',
+            'X-MiSub-Mode': 'node-export-plain'
+        };
+        if (userInfoHeader) {
+            nodeHeaders['Subscription-Userinfo'] = userInfoHeader;
+            nodeHeaders['Profile-Update-Interval'] = String(config.UpdateInterval || 24);
+        }
         // [兼容性优化] 第三方转换后端对明文列表的支持通常比 Base64 更好。
         // 同时对于 Cloudflare 而言，明文输出更有利于其边缘节点的流式处理。
         return new Response(contentToReturn, { 
-            headers: { 
-                "Content-Type": "text/plain; charset=utf-8", 
-                'Cache-Control': 'no-store, no-cache',
-                'X-MiSub-Mode': 'node-export-plain'
-            } 
+            headers: nodeHeaders
         });
     }
 
@@ -584,10 +638,12 @@ export async function handleMisubRequest(context) {
         const dataSourceUrl = new URL(request.url);
         
         // [加固] 彻底清理 URL 参数，防止参数污染导致后端返回 400 错误
-        // [优化] 不再强制注入 target=nodes，因为非浏览器请求已默认使用内置引擎
-        // [关键] 显式注入 builtin=true 确保后端拉取数据时强制走内置逻辑，打破重定向环
+        // [关键] 后端 converter 拉取数据源时必须拿到明文节点列表；否则未知 UA 会回退 base64，
+        // 第三方转换后端再按 Clash/Loon 等目标解析时会出现空订阅或拉取失败。
+        // 同时显式注入 builtin=true，确保数据源请求强制走内置节点导出逻辑，打破重定向环。
         const paramsToClear = ['target', 'engine', 'builtin', 'clash', 'singbox', 'surge', 'loon', 'quanx', 'egern', 'base64', 'v2ray', 'trojan', 'list', 'include', 'exclude'];
         paramsToClear.forEach(p => dataSourceUrl.searchParams.delete(p));
+        dataSourceUrl.searchParams.set('target', 'nodes');
         dataSourceUrl.searchParams.set('builtin', 'true');
 
         // [关键修复] 确保后端拉取数据时包含身份令牌
@@ -734,28 +790,7 @@ export async function handleMisubRequest(context) {
 
     if (shouldUseBuiltin) {
         try {
-            const totalUserInfo = targetMisubs.reduce((acc, sub) => {
-                if (sub.enabled && sub.userInfo) {
-                    return {
-                        upload: (acc.upload || 0) + (sub.userInfo.upload || 0),
-                        download: (acc.download || 0) + (sub.userInfo.download || 0),
-                        total: (acc.total || 0) + (sub.userInfo.total || 0),
-                        expire: Math.max(acc.expire || 0, sub.userInfo.expire || 0)
-                    };
-                }
-                return acc;
-            }, { upload: 0, download: 0, total: 0, expire: 0 });
-
-            const safeUserInfo = {
-                upload: isFinite(totalUserInfo.upload) ? totalUserInfo.upload : 0,
-                download: isFinite(totalUserInfo.download) ? totalUserInfo.download : 0,
-                total: isFinite(totalUserInfo.total) ? totalUserInfo.total : 0,
-                expire: isFinite(totalUserInfo.expire) ? totalUserInfo.expire : 0
-            };
-
-            const userInfoHeader = safeUserInfo.total > 0 
-                ? `upload=${safeUserInfo.upload}; download=${safeUserInfo.download}; total=${safeUserInfo.total}; expire=${safeUserInfo.expire}`
-                : null;
+            const userInfoHeader = buildUserInfoHeaderFromSubscriptions(context, targetMisubs);
 
             let { content: finalContent, contentType, headers: resultHeaders } = await ProcessorService.renderOutput({
                 targetFormat,
@@ -789,8 +824,7 @@ export async function handleMisubRequest(context) {
                 "Content-Disposition": `attachment; filename="${asciiSubName}"; filename*=utf-8''${encodedSubName}`,
                 'Content-Type': contentType || 'text/plain; charset=utf-8',
                 'Cache-Control': 'no-store, no-cache',
-                'X-MiSub-Mode': `builtin-${targetFormat}`,
-                'Access-Control-Allow-Origin': '*'
+                'X-MiSub-Mode': `builtin-${targetFormat}`
             });
 
             if (userInfoHeader) {
@@ -838,6 +872,11 @@ export async function handleMisubRequest(context) {
     }
 
     const base64Headers = { "Content-Type": "text/plain; charset=utf-8", 'Cache-Control': 'no-store, no-cache' };
+    const userInfoHeader = buildUserInfoHeaderFromSubscriptions(context, targetMisubs);
+    if (userInfoHeader) {
+        base64Headers['Subscription-Userinfo'] = userInfoHeader;
+        base64Headers['Profile-Update-Interval'] = String(config.UpdateInterval || 24);
+    }
     Object.entries(cacheHeaders).forEach(([key, value]) => {
         base64Headers[key] = value;
     });

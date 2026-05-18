@@ -60,7 +60,9 @@ function isStorageUnavailableError(error) {
     const message = String(error?.message || error || '').toLowerCase();
     return message.includes('kv storage is paused')
         || message.includes('storage is paused')
-        || message.includes('namespace is paused');
+        || message.includes('namespace is paused')
+        || message.includes('kv put() limit exceeded')
+        || message.includes('put() limit exceeded for the day');
 }
 
 async function safeKvGet(kv, key) {
@@ -556,9 +558,6 @@ export function createJsonResponse(data, status = 200, headers = {}) {
         status,
         headers: {
             'Content-Type': 'application/json; charset=utf-8',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             ...headers
         }
     });
