@@ -15,6 +15,15 @@ import {
     handlePublicPreviewRequest
 } from './subscription-handler.js';
 import {
+    handleWebdavBackupStatus,
+    handleWebdavBackupTest,
+    handleManualWebdavBackup,
+    handleWebdavBackupList,
+    handleWebdavRestore,
+    handleBackupExport,
+    handleBackupRestore
+} from './webdav-backup-handler.js';
+import {
     handleDebugSubscriptionRequest,
     handleSystemInfoRequest,
     handleStorageTestRequest,
@@ -39,6 +48,8 @@ import {
 import { handleGithubReleaseRequest } from './handlers/github-proxy-handler.js'; // [NEW] Import handler
 import { handleParseSubscription } from './parse-subscription-handler.js';
 import { safeFetchPublicUrl, validatePublicFetchUrl, redactUrl } from './security-utils.js';
+import { normalizeSubconverterBackend } from './subscription/main-handler.js';
+import { maybeRunScheduledTasks } from './scheduled-task-runner.js';
 
 // 常量定义
 const OLD_KV_KEY = 'misub_data_v1';
@@ -53,7 +64,7 @@ function isAuthDiagnosticsEnabled(env) {
  * @param {Object} env - Cloudflare环境对象
  * @returns {Promise<Response>} HTTP响应
  */
-export async function handleApiRequest(request, env) {
+export async function handleApiRequest(request, env, context = null) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api/, '');
 
@@ -214,7 +225,7 @@ export async function handleApiRequest(request, env) {
         }
 
 
-        return await handleDataRequest(env);
+        return await handleDataRequest(env, context || { env });
     }
 
     // [New] GitHub Proxy Route (Public)
@@ -349,6 +360,27 @@ export async function handleApiRequest(request, env) {
         case '/rule_templates':
             return await handleRuleTemplatesRequest(request, env);
 
+        case '/backup/export':
+            return await handleBackupExport(request, env);
+
+        case '/backup/restore':
+            return await handleBackupRestore(request, env);
+
+        case '/backup/webdav/status':
+            return await handleWebdavBackupStatus(env);
+
+        case '/backup/webdav/test':
+            return await handleWebdavBackupTest(request, env);
+
+        case '/backup/webdav/run':
+            return await handleManualWebdavBackup(request, env);
+
+        case '/backup/webdav/list':
+            return await handleWebdavBackupList(request, env);
+
+        case '/backup/webdav/restore':
+            return await handleWebdavRestore(request, env);
+
         case '/node_count':
             return await handleLegacyNodeCountRequest(request, env);
 
@@ -384,6 +416,9 @@ export async function handleApiRequest(request, env) {
 
         case '/parse_subscription':
             return await handleParseSubscription(request, env);
+
+        case '/subconverter/test':
+            return await handleSubconverterTestRequest(request, env);
 
         case '/logs':
             if (request.method === 'GET') {
@@ -441,6 +476,94 @@ export async function handleApiRequest(request, env) {
 
         default:
             return createErrorResponse('API route not found', 404);
+    }
+}
+
+export async function handleSubconverterTestRequest(request, env) {
+    if (request.method !== 'POST') {
+        return createErrorResponse('Method Not Allowed', 405);
+    }
+
+    let requestData;
+    try {
+        requestData = await request.json();
+    } catch (e) {
+        return createErrorResponse('Invalid JSON format', 400);
+    }
+
+    const { backend, target = 'clash', timeout = 15000 } = requestData || {};
+    let endpoint;
+    try {
+        endpoint = normalizeSubconverterBackend(backend);
+    } catch (error) {
+        return createJsonResponse({
+            success: false,
+            error: '转换后端地址无效，请填写域名或 http(s) URL。',
+            details: error.message
+        }, 400);
+    }
+
+    const safeTarget = /^[a-z0-9_-]{2,32}$/i.test(String(target || '')) ? String(target).toLowerCase() : 'clash';
+    const controller = new AbortController();
+    const normalizedTimeout = Math.min(Math.max(Number(timeout) || 15000, 3000), 30000);
+    const timeoutId = setTimeout(() => controller.abort(), normalizedTimeout);
+
+    try {
+        // 使用公开测试节点内容直接传给后端，避免探测时依赖用户订阅链接或 MiSub 回调 URL。
+        endpoint.searchParams.set('target', safeTarget);
+        endpoint.searchParams.set('url', 'trojan://password@example.com:443?allowInsecure=1&sni=example.com#MiSub-Test-Node');
+        endpoint.searchParams.set('insert', 'false');
+        endpoint.searchParams.set('emoji', 'false');
+        endpoint.searchParams.set('list', 'false');
+        endpoint.searchParams.set('udp', 'true');
+        endpoint.searchParams.set('tfo', 'false');
+        endpoint.searchParams.set('scv', 'true');
+        endpoint.searchParams.set('sort', 'false');
+
+        const startedAt = Date.now();
+        const response = await fetch(new Request(endpoint.toString(), {
+            method: 'GET',
+            headers: {
+                'User-Agent': 'MiSub/Backend-Test',
+                'Accept': '*/*',
+                'Cache-Control': 'no-cache'
+            },
+            signal: controller.signal
+        }));
+        const elapsedMs = Date.now() - startedAt;
+        clearTimeout(timeoutId);
+
+        const text = await response.text();
+        const sample = text.slice(0, 200);
+        const hasUsableOutput = response.ok && /MiSub-Test-Node|proxies:|proxy-groups:|trojan/i.test(text);
+
+        return createJsonResponse({
+            success: hasUsableOutput,
+            available: hasUsableOutput,
+            status: response.status,
+            statusText: response.statusText,
+            endpoint: `${endpoint.origin}${endpoint.pathname}`,
+            elapsedMs,
+            sample,
+            message: hasUsableOutput
+                ? `第三方转换后端可用，响应 ${response.status}，耗时 ${elapsedMs}ms。`
+                : `后端已响应但未返回有效转换结果（HTTP ${response.status}）。`
+        }, response.ok ? 200 : 502);
+    } catch (error) {
+        clearTimeout(timeoutId);
+        const isTimeout = error.name === 'AbortError';
+        console.error('[Subconverter Test] Error:', {
+            backend: endpoint ? `${endpoint.origin}${endpoint.pathname}` : '[invalid]',
+            error: error.message,
+            type: isTimeout ? 'timeout' : 'network'
+        });
+        return createJsonResponse({
+            success: false,
+            available: false,
+            endpoint: endpoint ? `${endpoint.origin}${endpoint.pathname}` : null,
+            error: isTimeout ? `测试超时（${normalizedTimeout}ms）` : `无法连接转换后端：${error.message}`,
+            errorType: isTimeout ? 'timeout' : 'network'
+        }, 502);
     }
 }
 
@@ -690,10 +813,17 @@ async function handleCronTriggerRequest(env) {
             console.warn('[Cron Trigger] Failed to save execution status:', error);
         }
 
+        const scheduledTasks = await maybeRunScheduledTasks({ env }, {
+            source: 'external-cron',
+            forceCheck: true,
+            awaitRun: true
+        }).catch(error => ({ success: false, error: error?.message || String(error) }));
+
         return createJsonResponse({
             success: true,
             message: 'Cron triggered successfully',
             result,
+            scheduledTasks,
             timestamp: new Date().toISOString()
         });
 

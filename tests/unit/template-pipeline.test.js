@@ -267,6 +267,22 @@ custom_proxy_group=TestGroup`, {
         expect(surgeRendered).not.toContain('reality=true');
     });
 
+    it('should render QuanX DNS using syntax accepted by Quantumult X', () => {
+        const quanxRendered = renderQuanxFromIniTemplate(`
+[Proxy]
+custom_proxy_group=TestGroup`, {
+            nodeList: 'trojan://password@1.2.3.4:443#HK-01',
+            targetFormat: 'quanx'
+        });
+
+        expect(quanxRendered).toContain('[dns]');
+        expect(quanxRendered).toContain('no-ipv6');
+        expect(quanxRendered).toContain('server = 223.5.5.5');
+        expect(quanxRendered).toContain('server = 114.114.114.114');
+        expect(quanxRendered).not.toContain('prefer-ipv4=true');
+        expect(quanxRendered).not.toContain('server=223.5.5.5');
+    });
+
     it('should render QuanX tuic and anytls syntax while skipping unsupported hysteria2', () => {
         const quanxRendered = renderQuanxFromIniTemplate(`
 [Proxy]
@@ -281,7 +297,26 @@ custom_proxy_group=TestGroup`, {
 
         expect(quanxRendered).not.toContain('hysteria2=');
         expect(quanxRendered).toContain('tuic=5.45.102.158:39689, a276f4e4-08b4-4a03-bfe8-f36ef17ad133, a276f4e4-08b4-4a03-bfe8-f36ef17ad133, sni=www.bing.com, congestion-controller=bbr, udp-relay=native, alpn=h3, tls-verification=false, tag=🌍 TUIC-QX');
-        expect(quanxRendered).toContain('anytls=156.239.232.67:443, password=9d6c62f6-e38d-4146-ab3e-d40568555f89, sni=xkhkfree.99887766.best, alpn=h2,h3, tls-verification=false, tag=🌍 AnyTLS-QX');
+        expect(quanxRendered).toContain('anytls=156.239.232.67:443, password=9d6c62f6-e38d-4146-ab3e-d40568555f89, over-tls=true, tls-verification=false, tls-host=xkhkfree.99887766.best, fast-open=false, udp-relay=true, tag=🌍 AnyTLS-QX');
+    });
+
+    it('should render QuanX VLESS TLS, REALITY and XTLS Vision syntax from templates', () => {
+        const quanxRendered = renderQuanxFromIniTemplate(`
+[Proxy]
+custom_proxy_group=TestGroup`, {
+            nodeList: [
+                'vless://11111111-1111-4111-8111-111111111111@tls.example.com:443?security=tls&sni=tls.example.com&type=tcp#VLESS-TLS',
+                'vless://22222222-2222-4222-8222-222222222222@reality.example.com:443?security=reality&sni=addons.mozilla.org&pbk=testpublickey&sid=abcdef&type=tcp#VLESS-Reality',
+                'vless://33333333-3333-4333-8333-333333333333@vision.example.com:443?security=tls&sni=vision.example.com&flow=xtls-rprx-vision&type=tcp#VLESS-Vision'
+            ].join('\n'),
+            targetFormat: 'quanx'
+        });
+
+        expect(quanxRendered).toContain('vless=tls.example.com:443, password=11111111-1111-4111-8111-111111111111, method=none, obfs=over-tls, obfs-host=tls.example.com, tag=🌍 VLESS-TLS');
+        expect(quanxRendered).toContain('vless=reality.example.com:443, password=22222222-2222-4222-8222-222222222222, method=none, obfs=over-tls, obfs-host=addons.mozilla.org, reality-base64-pubkey=testpublickey, reality-hex-shortid=abcdef, tag=🌍 VLESS-Reality');
+        expect(quanxRendered).toContain('vless=vision.example.com:443, password=33333333-3333-4333-8333-333333333333, method=none, obfs=over-tls, obfs-host=vision.example.com, flow=xtls-rprx-vision, tag=🌍 VLESS-Vision');
+        expect(quanxRendered).not.toContain('over-tls=true');
+        expect(quanxRendered).not.toContain('tls-host=vision.example.com');
     });
 
     it('should render QuanX vmess ws tls tag at the end in template output', () => {

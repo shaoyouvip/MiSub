@@ -2,7 +2,7 @@ import { StorageFactory } from '../../storage-adapter.js';
 import { migrateConfigSettings, formatBytes, migrateProfileIds, base64EncodeUtf8 } from '../utils.js';
 import { generateCombinedNodeList } from '../../services/subscription-service.js';
 import { sendEnhancedTgNotification, tgEscape } from '../notifications.js';
-import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS as defaultSettings } from '../config.js';
+import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS as defaultSettings, DEFAULT_SUBCONVERTER_BACKEND } from '../config.js';
 import { createDisguiseResponse } from '../disguise-page.js';
 import { generateCacheKey, setCache } from '../../services/node-cache-service.js';
 import { resolveRequestContext } from './request-context.js';
@@ -19,6 +19,7 @@ import { groupNodeLinesByProtocol } from './protocol-groups.js';
 import { shouldApplyExternalTemplateForTarget } from './template-compatibility.js';
 import { renderClashFromIniTemplate, renderLoonFromIniTemplate, renderQuanxFromIniTemplate, renderSingboxFromIniTemplate, renderSurgeFromIniTemplate } from './template-pipeline.js';
 import { getBuiltinTemplate } from './builtin-template-registry.js';
+import { assertPublicNetworkUrl } from '../security-utils.js';
 
 function maskSensitiveLogValue(value) {
     const text = String(value ?? '');
@@ -158,6 +159,96 @@ export function resolveTemplateSource(value) {
 export function resolveExternalTemplateConfigUrl(templateSource) {
     if (!templateSource || typeof templateSource !== 'object') return '';
     return templateSource.kind === 'remote' ? String(templateSource.value || '').trim() : '';
+}
+
+export function normalizeSubconverterBackend(input, fallback = DEFAULT_SUBCONVERTER_BACKEND) {
+    let backend = String(input || fallback || DEFAULT_SUBCONVERTER_BACKEND).trim();
+
+    // 防止历史 UI 文案或标签被误保存为后端地址。
+    if (!backend || backend.includes('后端') || backend.includes('参数')) {
+        backend = fallback || DEFAULT_SUBCONVERTER_BACKEND;
+    }
+
+    // 用户只需填写 host，例如 subapi.cmliussss.net 或 api.v1.mk。
+    // 兼容历史完整 URL，但统一规范为 https://<host>/sub。
+    backend = backend.replace(/\s+/g, '');
+    if (!/^https?:\/\//i.test(backend)) {
+        backend = `https://${backend}`;
+    }
+
+    const externalUrl = assertPublicNetworkUrl(backend);
+    if (externalUrl.pathname === '/' || !externalUrl.pathname) {
+        externalUrl.pathname = '/sub';
+    }
+    if (externalUrl.pathname !== '/sub') {
+        externalUrl.pathname = '/sub';
+    }
+
+    // 历史默认值可能保存为 /sub?；URL 会自动消除空 query。
+    externalUrl.hash = '';
+    return externalUrl;
+}
+
+export function buildExternalSubconverterUrl({
+    backend,
+    targetFormat,
+    nodeList,
+    requestUrl,
+    profileSub = {},
+    globalSub = {},
+    userAgent = '',
+    searchParams,
+    templateSource,
+    subName = ''
+} = {}) {
+    const externalUrl = normalizeSubconverterBackend(backend);
+    const params = searchParams || new URLSearchParams('');
+
+    // [优化] 解析 targetFormat，支持带参数的格式（如 surge&ver=4）
+    const [targetBase, ...targetParams] = String(targetFormat || '').split('&');
+    externalUrl.searchParams.set('target', targetBase || 'clash');
+    targetParams.forEach(p => {
+        const [k, v] = p.split('=');
+        if (k && v) externalUrl.searchParams.set(k, v);
+    });
+
+    const normalizedNodeList = String(nodeList || '').trim();
+    if (normalizedNodeList) {
+        // 关键：第三方转换模式应接收 MiSub 已完成预处理后的节点列表。
+        // subconverter 对多个内联节点更稳定的分隔符是 `|`；保留换行会让部分后端只解析首行或直接报 No nodes were found。
+        const inlineNodeList = normalizedNodeList.split(/\r?\n+/).map(line => line.trim()).filter(Boolean).join('|');
+        externalUrl.searchParams.set('url', inlineNodeList);
+    } else if (requestUrl) {
+        // 兜底保留旧回调 URL 逻辑，避免异常空列表场景构造无效 converter 请求。
+        const dataSourceUrl = new URL(requestUrl);
+        const paramsToClear = ['target', 'engine', 'builtin', 'clash', 'singbox', 'surge', 'loon', 'quanx', 'egern', 'base64', 'v2ray', 'trojan', 'list', 'include', 'exclude'];
+        paramsToClear.forEach(p => dataSourceUrl.searchParams.delete(p));
+        dataSourceUrl.searchParams.set('target', 'nodes');
+        dataSourceUrl.searchParams.set('builtin', 'true');
+        externalUrl.searchParams.set('url', dataSourceUrl.toString());
+    }
+
+    const effectiveOptions = { ...(globalSub.defaultOptions || {}), ...(profileSub.options || {}) };
+    const flagMap = { udp: 'udp', emoji: 'emoji', scv: 'scv', sort: 'sort', tfo: 'tfo', list: 'list' };
+
+    if (isMetaCore(userAgent, params)) {
+        externalUrl.searchParams.set('meta', 'true');
+    }
+
+    Object.entries(flagMap).forEach(([key, paramName]) => {
+        const val = params.has(paramName)
+            ? params.get(paramName) === 'true'
+            : effectiveOptions[key];
+        externalUrl.searchParams.set(paramName, val ? 'true' : 'false');
+    });
+
+    const externalTemplateConfigUrl = resolveExternalTemplateConfigUrl(templateSource);
+    if (externalTemplateConfigUrl) {
+        externalUrl.searchParams.set('config', externalTemplateConfigUrl);
+    }
+
+    externalUrl.searchParams.set('filename', subName);
+    return externalUrl;
 }
 
 export function resolveBuiltinEngineFlags(config = {}, isExternalMode = false) {
@@ -567,7 +658,12 @@ export async function handleMisubRequest(context) {
         const sourceNames = targetMisubs
             .filter(s => typeof s?.url === 'string' && s.url.startsWith('http'))
             .map(s => s.name || s.url);
-        await setCache(storageAdapter, cacheKey, freshNodes, sourceNames);
+        // 仅在至少一个订阅源真正从远程拉取成功时才刷新缓存时间
+        // 如果没有 HTTP 订阅源（纯手动节点/过期订阅组），则始终写入缓存
+        const stats = context.generationStats;
+        if (!stats?.sourceCount || stats.upstreamSuccessCount > 0) {
+            await setCache(storageAdapter, cacheKey, freshNodes, sourceNames);
+        }
         return freshNodes;
     };
 
@@ -607,81 +703,19 @@ export async function handleMisubRequest(context) {
 
     // 2. If external mode active, build the redirect URL and return 302
     if (isExternalMode && targetFormat !== 'base64') {
-        let backend = url.searchParams.get('backend') || profileSub.backend || globalSub.defaultBackend || "https://sub.id9.cc/sub?";
-        
-        // [加固] 防止 UI 标签泄漏到配置中
-        if (typeof backend === 'string' && (backend.includes('后端') || backend.includes('参数'))) {
-            backend = "https://subapi.cmliussss.net/sub?";
-        }
-
-        // [自动纠错] 如果地址不带 http/https 协议，自动补全
-        if (backend && typeof backend === 'string' && !backend.startsWith('http://') && !backend.startsWith('https://')) {
-            backend = 'http://' + backend;
-        }
-
-        const externalUrl = new URL(backend);
-
-        // [Fix] Automatically append '/sub' if the backend URL only has a root path.
-        // Most subconverter backends (FatSheep, subapi, etc.) use /sub as the conversion endpoint.
-        if (externalUrl.pathname === '/' || !externalUrl.pathname) {
-            externalUrl.pathname = '/sub';
-        }
-        // [优化] 解析 targetFormat，支持带参数的格式（如 surge&ver=4）
-        const [targetBase, ...targetParams] = targetFormat.split('&');
-        externalUrl.searchParams.set('target', targetBase);
-        targetParams.forEach(p => {
-            const [k, v] = p.split('=');
-            if (k && v) externalUrl.searchParams.set(k, v);
+        const backend = url.searchParams.get('backend') || profileSub.backend || globalSub.defaultBackend;
+        const externalUrl = buildExternalSubconverterUrl({
+            backend,
+            targetFormat,
+            nodeList: isProfileExpired ? (DEFAULT_EXPIRED_NODE + '\n') : combinedNodeList,
+            requestUrl: request.url,
+            profileSub,
+            globalSub,
+            userAgent: userAgentHeader,
+            searchParams: url.searchParams,
+            templateSource,
+            subName
         });
-        
-        // Data source is THIS worker, but forcing builtin and nodes format
-        const dataSourceUrl = new URL(request.url);
-        
-        // [加固] 彻底清理 URL 参数，防止参数污染导致后端返回 400 错误
-        // [关键] 后端 converter 拉取数据源时必须拿到明文节点列表；否则未知 UA 会回退 base64，
-        // 第三方转换后端再按 Clash/Loon 等目标解析时会出现空订阅或拉取失败。
-        // 同时显式注入 builtin=true，确保数据源请求强制走内置节点导出逻辑，打破重定向环。
-        const paramsToClear = ['target', 'engine', 'builtin', 'clash', 'singbox', 'surge', 'loon', 'quanx', 'egern', 'base64', 'v2ray', 'trojan', 'list', 'include', 'exclude'];
-        paramsToClear.forEach(p => dataSourceUrl.searchParams.delete(p));
-        dataSourceUrl.searchParams.set('target', 'nodes');
-        dataSourceUrl.searchParams.set('builtin', 'true');
-
-        // [关键修复] 确保后端拉取数据时包含身份令牌
-        // 只有当 URL 路径中不包含令牌时，才在查询参数中显式注入
-        const pathSegments = dataSourceUrl.pathname.split('/').filter(Boolean);
-        const hasTokenInPath = pathSegments.some(seg => seg === config.mytoken || seg === config.profileToken);
-
-        if (!hasTokenInPath && !dataSourceUrl.searchParams.has('token')) {
-            const authToken = token || currentProfile?.token || config.mytoken;
-            if (authToken) dataSourceUrl.searchParams.set('token', authToken);
-        }
-
-        externalUrl.searchParams.set('url', dataSourceUrl.toString());
-        
-        // Map Boolean Flags
-        const effectiveOptions = { ...globalSub.defaultOptions, ...profileSub.options };
-        const flagMap = { udp: 'udp', emoji: 'emoji', scv: 'scv', sort: 'sort', tfo: 'tfo', list: 'list' };
-        
-        // [元数据核心支持] 如果是 Meta 核心，告知第三方转换后端使用 Meta 语法
-        if (isMetaCore(userAgentHeader, url.searchParams)) {
-            externalUrl.searchParams.set('meta', 'true');
-        }
-
-        Object.entries(flagMap).forEach(([key, paramName]) => {
-            const val = url.searchParams.has(paramName) 
-                ? url.searchParams.get(paramName) === 'true' 
-                : effectiveOptions[key];
-            externalUrl.searchParams.set(paramName, val ? 'true' : 'false');
-        });
-
-        // Pass Remote Config if applicable
-        const externalTemplateConfigUrl = resolveExternalTemplateConfigUrl(templateSource);
-        if (externalTemplateConfigUrl) {
-            externalUrl.searchParams.set('config', externalTemplateConfigUrl);
-        }
-
-        // Add File Name
-        externalUrl.searchParams.set('filename', subName);
 
         // [Access Log] Send notification for external redirection
         if (!url.searchParams.has('callback_token') && !shouldSkipLogging && config.enableAccessLog) {

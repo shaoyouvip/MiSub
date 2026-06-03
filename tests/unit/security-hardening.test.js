@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleApiRequest, handleExternalFetchRequest } from '../../functions/modules/api-router.js';
+import { handleApiRequest, handleExternalFetchRequest, handleSubconverterTestRequest } from '../../functions/modules/api-router.js';
 import {
   handleDebugSubscriptionRequest,
   handleExportDataRequest,
   handlePreviewContentRequest
 } from '../../functions/modules/handlers/debug-handler.js';
-import { handleLogin } from '../../functions/modules/auth-middleware.js';
+import { handleLogin, createSignedToken, getAuthSessionDiagnostic } from '../../functions/modules/auth-middleware.js';
+import { SESSION_DURATION } from '../../functions/modules/config.js';
 import { handleMisubRequest } from '../../functions/modules/subscription/main-handler.js';
 import { onRequest } from '../../functions/[[path]].js';
 
@@ -88,6 +89,31 @@ describe('security hardening', () => {
     });
   });
 
+  it('keeps browser login sessions valid for seven days', async () => {
+    const env = { MISUB_KV: createKv(), COOKIE_SECRET: 'stable-cookie-secret' };
+    const issuedAt = Date.now() - (6 * 24 * 60 * 60 * 1000 + 23 * 60 * 60 * 1000);
+    const token = await createSignedToken(env.COOKIE_SECRET, String(issuedAt));
+    const diagnostic = await getAuthSessionDiagnostic({
+      headers: { get: name => name.toLowerCase() === 'cookie' ? `auth_session=${token}` : '' }
+    }, env);
+
+    expect(SESSION_DURATION).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(diagnostic.isAuthenticated).toBe(true);
+    expect(diagnostic.reason).toBe('ok');
+  });
+
+  it('marks browser login sessions expired after seven days', async () => {
+    const env = { MISUB_KV: createKv(), COOKIE_SECRET: 'stable-cookie-secret' };
+    const issuedAt = Date.now() - (7 * 24 * 60 * 60 * 1000 + 1000);
+    const token = await createSignedToken(env.COOKIE_SECRET, String(issuedAt));
+    const diagnostic = await getAuthSessionDiagnostic({
+      headers: { get: name => name.toLowerCase() === 'cookie' ? `auth_session=${token}` : '' }
+    }, env);
+
+    expect(diagnostic.isAuthenticated).toBe(false);
+    expect(diagnostic.reason).toBe('expired');
+  });
+
   it('does not expose public auth debug endpoints in production', async () => {
     const env = { MISUB_KV: createKv(), COOKIE_SECRET: 'stable-cookie-secret', ADMIN_PASSWORD: 'secret-password' };
 
@@ -117,28 +143,80 @@ describe('security hardening', () => {
     expect(body.success).toBe(true);
   });
 
-  it('rejects cron secret in query string and accepts Authorization bearer only', async () => {
+  it('supports cron query secret compatibility and Authorization bearer', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const env = {
       ASSETS: createAssets(),
       MISUB_DB: createD1({ cronSecret: 'cron-secret' })
     };
     const next = vi.fn(async () => new Response('next'));
 
-    const queryResponse = await onRequest({
-      request: new Request('https://example.com/cron?secret=cron-secret'),
-      env,
-      next
-    });
-    const bearerResponse = await onRequest({
-      request: new Request('https://example.com/cron', {
-        headers: { Authorization: 'Bearer cron-secret' }
-      }),
-      env,
-      next
-    });
+    try {
+      const queryResponse = await onRequest({
+        request: new Request('https://example.com/cron?secret=cron-secret'),
+        env,
+        next
+      });
+      const bearerResponse = await onRequest({
+        request: new Request('https://example.com/cron', {
+          headers: { Authorization: 'Bearer cron-secret' }
+        }),
+        env,
+        next
+      });
+      const wrongQueryResponse = await onRequest({
+        request: new Request('https://example.com/cron?secret=wrong'),
+        env,
+        next
+      });
 
-    expect(queryResponse.status).toBe(401);
-    expect(bearerResponse.status).not.toBe(401);
+      expect(queryResponse.status).not.toBe(401);
+      expect(bearerResponse.status).not.toBe(401);
+      expect(wrongQueryResponse.status).toBe(401);
+      expect(warnSpy).toHaveBeenCalledWith('[Storage] No KV binding found, using noop adapter');
+      expect(infoSpy).toHaveBeenCalledWith('[Cron] Starting parallel update for 0 subscriptions');
+    } finally {
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    }
+  });
+
+  it('tests subconverter backends with a synthetic node without exposing user subscriptions', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('proxies:\n  - name: MiSub-Test-Node\n', { status: 200 }));
+
+    const response = await handleSubconverterTestRequest(new Request('https://example.com/api/subconverter/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend: 'api.v1.mk' })
+    }), {});
+    const body = await response.json();
+    const requestArg = fetchSpy.mock.calls[0][0];
+    const testUrl = new URL(requestArg.url);
+
+    expect(response.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.endpoint).toBe('https://api.v1.mk/sub');
+    expect(testUrl.origin + testUrl.pathname).toBe('https://api.v1.mk/sub');
+    expect(testUrl.searchParams.get('target')).toBe('clash');
+    expect(testUrl.searchParams.get('url')).toContain('MiSub-Test-Node');
+    expect(testUrl.searchParams.get('url')).not.toContain('airport.example');
+  });
+
+  it('reports backend test failure when converter output is not usable', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('No nodes were found!', { status: 200 }));
+
+    const response = await handleSubconverterTestRequest(new Request('https://example.com/api/subconverter/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend: 'subapi.cmliussss.net' })
+    }), {});
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.success).toBe(false);
+    expect(body.available).toBe(false);
+    expect(body.message).toContain('未返回有效转换结果');
   });
 
   it('does not pass insecureSkipVerify when previewing external content', async () => {
