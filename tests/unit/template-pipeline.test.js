@@ -314,7 +314,7 @@ custom_proxy_group=TestGroup`, {
 
         expect(quanxRendered).toContain('vless=tls.example.com:443, password=11111111-1111-4111-8111-111111111111, method=none, obfs=over-tls, obfs-host=tls.example.com, tag=🌍 VLESS-TLS');
         expect(quanxRendered).toContain('vless=reality.example.com:443, password=22222222-2222-4222-8222-222222222222, method=none, obfs=over-tls, obfs-host=addons.mozilla.org, reality-base64-pubkey=testpublickey, reality-hex-shortid=abcdef, tag=🌍 VLESS-Reality');
-        expect(quanxRendered).toContain('vless=vision.example.com:443, password=33333333-3333-4333-8333-333333333333, method=none, obfs=over-tls, obfs-host=vision.example.com, flow=xtls-rprx-vision, tag=🌍 VLESS-Vision');
+        expect(quanxRendered).toContain('vless=vision.example.com:443, password=33333333-3333-4333-8333-333333333333, method=none, obfs=over-tls, obfs-host=vision.example.com, vless-flow=xtls-rprx-vision, tag=🌍 VLESS-Vision');
         expect(quanxRendered).not.toContain('over-tls=true');
         expect(quanxRendered).not.toContain('tls-host=vision.example.com');
     });
@@ -486,6 +486,31 @@ custom_proxy_group=📥 下载服务\`select\`[]🚀 节点选择\`[]DIRECT
         expect(Object.values(providers).map(provider => provider.url)).not.toContain('https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Providers/Download.yaml');
         expect(downloadProvider).toMatchObject({ behavior: 'classical', format: 'text', path: './ruleset/download_0.list' });
         expect(parsed.rules).toContain('RULE-SET,download_0,📥 下载服务');
+    });
+
+    it('keeps non-ACL4SSR raw GitHub rule URLs unchanged', () => {
+        const rendered = renderClashFromIniTemplate(`
+[custom]
+ruleset=🎯 全球直连,https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Apple.list
+ruleset=🎯 全球直连,https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Microsoft.list
+ruleset=🐟 漏网之鱼,[]FINAL
+custom_proxy_group=🚀 节点选择\`select\`[]DIRECT\`.*
+`, {
+            nodeList: 'trojan://password@1.2.3.4:443#HK-01',
+            targetFormat: 'clash'
+        });
+
+        const parsed = yaml.load(rendered);
+        const providerUrls = Object.values(parsed['rule-providers'] || {}).map(provider => provider.url);
+
+        expect(providerUrls).toContain('https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Apple.list');
+        expect(providerUrls).toContain('https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Microsoft.list');
+        expect(providerUrls).not.toContain('https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Providers/Apple.yaml');
+        expect(providerUrls).not.toContain('https://raw.githubusercontent.com/szkane/ClashRuleSet/main/Clash/Providers/Ruleset/Microsoft.yaml');
+        expect(Object.values(parsed['rule-providers'] || {})).toEqual(expect.arrayContaining([
+            expect.objectContaining({ format: 'text', path: './ruleset/apple_0.list' }),
+            expect.objectContaining({ format: 'text', path: './ruleset/microsoft_1.list' })
+        ]));
     });
 
     it('uses short ACL4SSR file names as rule-provider name hints instead of rs fallback names', () => {

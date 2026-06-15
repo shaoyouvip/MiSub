@@ -12,6 +12,7 @@ import { useNodeForms } from '../../../composables/useNodeForms.js';
 import { useBulkImportLogic } from '../../../composables/useBulkImportLogic.js';
 import { useBackupLogic } from '../../../composables/useBackupLogic.js';
 import { storeToRefs } from 'pinia';
+import { useI18n } from '@/i18n/index.js';
 
 const isDev = import.meta.env.DEV;
 
@@ -34,12 +35,14 @@ const LogModal = defineAsyncComponent(() => import('../../modals/LogModal.vue'))
 const NodePreviewModal = defineAsyncComponent(() => import('../../modals/NodePreview/NodePreviewModal.vue'));
 
 const BatchGroupModal = defineAsyncComponent(() => import('../../modals/BatchGroupModal.vue'));
+const GroupManagementModal = defineAsyncComponent(() => import('../../modals/GroupManagementModal.vue'));
 const QRCodeModal = defineAsyncComponent(() => import('../../modals/QRCodeModal.vue'));
 const CopyLinkModal = defineAsyncComponent(() => import('../../modals/CopyLinkModal.vue'));
 
 // --- 基礎 Props 和狀態 ---
 const props = defineProps({ data: Object });
 const { showToast } = useToastStore();
+const { t } = useI18n();
 const uiStore = useUIStore();
 const dataStore = useDataStore();
 const { settings, isDirty, isLoading } = storeToRefs(dataStore); // Use store refs
@@ -74,14 +77,14 @@ const handleQRCode = (id, type = 'subscription') => {
     const sub = subscriptions.value.find(s => s.id === id);
     if (sub) {
       qrCodeUrl.value = sub.url;
-      qrCodeTitle.value = sub.name || '订阅二维码';
+      qrCodeTitle.value = sub.name || t('subscriptions.qrCodeTitle');
       showQRCodeModal.value = true;
     }
   } else if (type === 'profile') {
     const profile = profiles.value.find(p => p.id === id);
     if (profile) {
       if (!settings.value.profileToken) {
-          showToast("未配置订阅组 Token，无法生成链接", "error");
+          showToast(t('notices.noToken'), 'error');
           return;
       }
       const token = settings.value.profileToken;
@@ -89,7 +92,7 @@ const handleQRCode = (id, type = 'subscription') => {
       // Using similar logic to useProfiles copy link
       const idToUse = profile.customId || profile.id;
       qrCodeUrl.value = `${baseUrl}/${token}/${idToUse}`; 
-      qrCodeTitle.value = profile.name || '订阅组二维码';
+      qrCodeTitle.value = profile.name || t('profiles.qrCodeTitle');
       showQRCodeModal.value = true;
     }
   }
@@ -115,7 +118,7 @@ const {
   changeManualNodesPage, addNode, updateNode, deleteNode, deleteAllNodes,
   addNodesFromBulk, autoSortNodes, deduplicateNodes,
   reorderManualNodes, activeGroupFilter, setGroupFilter, batchUpdateGroup, batchDeleteNodes, buildDedupPlan, applyDedupPlan,
-  manualNodeGroups, renameGroup, deleteGroup // Added group helpers
+  manualNodeGroups, renameGroup, deleteGroup, reorderGroups // Added group helpers
 } = useManualNodes(markDirty);
 
 const handleSearchTermUpdate = (val) => {
@@ -171,6 +174,7 @@ const showDedupModal = ref(false);
 const dedupPlan = ref(null);
 const showBatchGroupModal = ref(false); // Added
 const batchGroupIds = ref([]); // Added
+const showGroupManagementModal = ref(false); // 分组管理模态框
 
 // 节点预览相关状态
 const showNodePreviewModal = ref(false);
@@ -205,7 +209,7 @@ const initializeState = async () => {
 const handleBeforeUnload = (event) => {
   if (isDirty.value) {
     event.preventDefault();
-    event.returnValue = '您有未保存的更改，確定要离开嗎？';
+    event.returnValue = t('common.unsavedLeaveConfirm');
   }
 };
 
@@ -245,7 +249,7 @@ const setViewMode = (mode) => {
 const handleDiscard = async () => {
   // 强制刷新数据，忽略缓存
   await dataStore.fetchData(true);
-  showToast('已放弃所有未保存的更改');
+  showToast(t('notices.discardedChanges'));
 };
 
 const handleSave = async () => {
@@ -286,13 +290,13 @@ const handleDeleteAllNodesWithCleanup = () => {
 };
 const handleAutoSortNodes = () => {
   autoSortNodes();
-  showToast('已按地区排序，请手动保存', 'success');
+  showToast(t('manualNodes.sortedByRegion'), 'success');
 };
 
 const handleDeduplicateNodes = () => {
   const plan = buildDedupPlan();
   if (!plan || plan.removeCount === 0) {
-    showToast('没有发现重复的节点。', 'info');
+    showToast(t('manualNodes.noDuplicates'), 'info');
     return;
   }
   dedupPlan.value = plan;
@@ -322,12 +326,32 @@ const handleBatchGroupConfirm = (groupName) => {
   batchGroupIds.value = [];
 };
 
+// 分组管理处理函数
+const handleOpenGroupManagement = () => {
+  showGroupManagementModal.value = true;
+};
+
+const handleGroupRename = (oldName, newName) => {
+  renameGroup(oldName, newName);
+  showToast(t('manualNodes.groupRenamed', { oldName, newName }), 'success');
+};
+
+const handleGroupDelete = (groupName) => {
+  deleteGroup(groupName);
+  showToast(t('manualNodes.groupDeleted', { groupName }), 'success');
+};
+
+const handleGroupReorder = (newOrder) => {
+  reorderGroups(newOrder);
+  showToast(t('manualNodes.groupOrderUpdated'), 'success');
+};
+
 // 节点预览处理函数
 const handlePreviewSubscription = (subscriptionId) => {
   const subscription = subscriptions.value.find(s => s.id === subscriptionId);
   if (subscription) {
     previewSubscriptionId.value = subscriptionId;
-    previewSubscriptionName.value = subscription.name || '未命名订阅';
+    previewSubscriptionName.value = subscription.name || t('subscriptions.unnamed');
     previewSubscriptionUrl.value = subscription.url;
     previewProfileId.value = null;
     previewProfileName.value = '';
@@ -423,7 +447,8 @@ import SavePrompt from '../../ui/SavePrompt.vue';
           @batch-update-group="(ids, group) => batchUpdateGroup(ids, group)" 
           @batch-delete-nodes="handleBatchDeleteRequest" 
           @rename-group="renameGroup" @delete-group="deleteGroup"
-          @open-batch-group-modal="handleOpenBatchGroupModal" />
+          @open-batch-group-modal="handleOpenBatchGroupModal"
+          @manage-groups="handleOpenGroupManagement" />
       </div>
 
       <!-- Right Column -->
@@ -440,28 +465,27 @@ import SavePrompt from '../../ui/SavePrompt.vue';
   <BulkImportModal v-model:show="showBulkImportModal" @import="(txt, tag) => handleBulkImport(txt, tag)" />
   <LogModal v-model:show="showLogModal" />
   <Modal v-model:show="showDeleteSubsModal" @confirm="handleDeleteAllSubscriptionsWithCleanup"><template #title>
-      <h3 class="text-lg font-bold text-red-500">确认清空订阅</h3>
+      <h3 class="text-lg font-bold text-red-500">{{ t('subscriptions.deleteAllConfirmTitle') }}</h3>
     </template><template #body>
-      <p class="text-sm text-gray-400">您确定要删除所有**订阅**吗？此操作将标记为待保存，不会影响手动节点。</p>
+      <p class="text-sm text-gray-400">{{ t('subscriptions.deleteAllConfirmBody') }}</p>
     </template></Modal>
   <Modal v-model:show="showDeleteNodesModal" @confirm="handleDeleteAllNodesWithCleanup"><template #title>
-      <h3 class="text-lg font-bold text-red-500">确认清空节点</h3>
+      <h3 class="text-lg font-bold text-red-500">{{ t('manualNodes.deleteAllConfirmTitle') }}</h3>
     </template><template #body>
-      <p class="text-sm text-gray-400">您确定要删除所有**手动节点**吗？此操作将标记为待保存，不会影响订阅。</p>
+      <p class="text-sm text-gray-400">{{ t('manualNodes.deleteAllConfirmBody') }}</p>
     </template></Modal>
   <Modal v-model:show="showBatchDeleteModal" @confirm="confirmBatchDelete">
     <template #title>
-      <h3 class="text-lg font-bold text-red-500">确认批量删除</h3>
+      <h3 class="text-lg font-bold text-red-500">{{ t('manualNodes.batchDeleteConfirmTitle') }}</h3>
     </template>
     <template #body>
-      <p class="text-sm text-gray-600 dark:text-gray-300">您确定要删除选中的 <span class="font-bold border-b border-red-500">{{
-        batchDeleteIds.length }}</span> 个节点吗？此操作不可恢复。</p>
+      <p class="text-sm text-gray-600 dark:text-gray-300">{{ t('manualNodes.batchDeleteConfirmBody', { count: batchDeleteIds.length }) }}</p>
     </template>
   </Modal>
   <Modal v-model:show="showDeleteProfilesModal" @confirm="handleDeleteAllProfiles"><template #title>
-      <h3 class="text-lg font-bold text-red-500">确认清空订阅组</h3>
+      <h3 class="text-lg font-bold text-red-500">{{ t('profiles.deleteAllConfirmTitle') }}</h3>
     </template><template #body>
-      <p class="text-sm text-gray-400">您确定要删除所有**订阅组**吗？此操作不可逆。</p>
+      <p class="text-sm text-gray-400">{{ t('profiles.deleteAllConfirmBody') }}</p>
     </template></Modal>
 
   <ProfileModal v-if="showProfileModal" v-model:show="showProfileModal" :profile="editingProfile" :is-new="isNewProfile"
@@ -474,6 +498,14 @@ import SavePrompt from '../../ui/SavePrompt.vue';
   
   <BatchGroupModal v-model:show="showBatchGroupModal" :groups="manualNodeGroups" @confirm="handleBatchGroupConfirm" />
 
+  <GroupManagementModal 
+    v-model:show="showGroupManagementModal" 
+    :groups="manualNodeGroups" 
+    @rename="handleGroupRename"
+    @delete="handleGroupDelete"
+    @reorder="handleGroupReorder"
+  />
+
   <SubscriptionEditModal v-model:show="showSubModal" :is-new="isNewSubscription"
     :editing-subscription="editingSubscription" @confirm="handleSaveSubscription" />
 
@@ -482,7 +514,7 @@ import SavePrompt from '../../ui/SavePrompt.vue';
   <SubscriptionImportModal :show="showSubscriptionImportModal" @update:show="showSubscriptionImportModal = $event"
     :add-nodes-from-bulk="addNodesFromBulk" />
 
-  <!-- 节点预览模态窗口 -->
+  <!-- Node preview modal -->
   <NodePreviewModal :show="showNodePreviewModal" :subscription-id="previewSubscriptionId"
     :subscription-name="previewSubscriptionName" :subscription-url="previewSubscriptionUrl"
     :profile-id="previewProfileId" :profile-name="previewProfileName" @update:show="showNodePreviewModal = $event" />
